@@ -53,6 +53,7 @@
     view = "login";
     crumbs = [];
     items = [];
+    continueWatching = [];
     render();
   }
 
@@ -60,6 +61,7 @@
   let view = "login";     // login | browse | player
   let crumbs = [];         // [{id, name}]
   let items = [];
+  let continueWatching = [];
   let loading = false;
   let errorMsg = "";
   let playerItem = null;
@@ -144,6 +146,7 @@
       items = libs;
       loading = false;
       render();
+      loadContinueWatching();
     } catch (e) {
       if (gen !== loadGeneration) return;
       loading = false;
@@ -166,12 +169,25 @@
       items = data.Items || [];
       loading = false;
       render();
+      if (crumbs.length <= 1) loadContinueWatching();
     } catch (e) {
       if (gen !== loadGeneration) return;
       loading = false;
       errorMsg = e.message;
       render();
     }
+  }
+
+  async function loadContinueWatching() {
+    try {
+      const data = await api(
+        `/Users/${store.userId}/Items/Resume?Limit=12&IncludeItemTypes=Movie,Episode,Video&MediaTypes=Video`
+      );
+      continueWatching = data.Items || [];
+    } catch (e) {
+      continueWatching = [];
+    }
+    if (view === "browse") render();
   }
 
   async function waitForLibraryIdle(timeoutMs) {
@@ -244,6 +260,38 @@
     ]);
 
     const main = el("main");
+
+    if (crumbs.length <= 1 && continueWatching.length > 0) {
+      const cwGrid = el("div", { class: "grid cw-grid" });
+      for (const cw of continueWatching) {
+        const thumb = thumbUrl(cw);
+        const thumbEl = el("div", {
+          class: "thumb",
+          style: thumb ? `background-image:url('${thumb}')` : "",
+        });
+        if (!thumb) thumbEl.textContent = "\u{1F3AC}";
+        const runTicks = cw.RunTimeTicks || 0;
+        const posTicks = (cw.UserData && cw.UserData.PlaybackPositionTicks) || 0;
+        const pct = runTicks ? Math.min(100, (posTicks / runTicks) * 100) : 0;
+        thumbEl.appendChild(
+          el("div", { class: "cw-progress" }, [el("div", { class: "cw-progress-fill", style: `width:${pct}%` })])
+        );
+        const label = cw.SeriesName ? `${cw.SeriesName} — ${cw.Name}` : cw.Name;
+        const tile = el(
+          "div",
+          { class: "tile video", tabindex: "0", role: "button" },
+          [thumbEl, el("div", { class: "label" }, label)]
+        );
+        const activate = () => openPlayer(cw);
+        tile.addEventListener("click", activate);
+        tile.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
+        });
+        cwGrid.appendChild(tile);
+      }
+      main.appendChild(el("div", { class: "section-label" }, "Continue Watching"));
+      main.appendChild(cwGrid);
+    }
 
     if (loading) {
       main.appendChild(el("div", { class: "loading" }, "Loading..."));
@@ -329,6 +377,8 @@
     currentAudioIndex: null,
     currentSubtitleIndex: -1,
     playSessionId: null,
+    initialResumeSeconds: 0,
+    progressTimer: null,
     hls: null,
     video: null,
     wrap: null,
@@ -345,10 +395,60 @@
     }).catch(() => {});
   }
 
+  function reportPlayingStart() {
+    if (!player.item) return;
+    fetch(apiKeyUrl("/Sessions/Playing"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ItemId: player.item.Id,
+        MediaSourceId: player.mediaSourceId,
+        PlaySessionId: player.playSessionId,
+        PositionTicks: Math.round((player.video.currentTime || 0) * 10000000),
+        CanSeek: true,
+        PlayMethod: "Transcode",
+      }),
+    }).catch(() => {});
+  }
+
+  function reportProgress(isPaused) {
+    if (!player.item || !player.video) return;
+    fetch(apiKeyUrl("/Sessions/Playing/Progress"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ItemId: player.item.Id,
+        MediaSourceId: player.mediaSourceId,
+        PlaySessionId: player.playSessionId,
+        PositionTicks: Math.round((player.video.currentTime || 0) * 10000000),
+        IsPaused: !!isPaused,
+        PlayMethod: "Transcode",
+      }),
+    }).catch(() => {});
+  }
+
+  function reportStopped() {
+    if (!player.item || !player.video || !player.playSessionId) return;
+    const payload = JSON.stringify({
+      ItemId: player.item.Id,
+      MediaSourceId: player.mediaSourceId,
+      PlaySessionId: player.playSessionId,
+      PositionTicks: Math.round((player.video.currentTime || 0) * 10000000),
+    });
+    const url = apiKeyUrl("/Sessions/Playing/Stopped");
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(url, new Blob([payload], { type: "application/json" }));
+    } else {
+      fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: payload, keepalive: true }).catch(() => {});
+    }
+  }
+
   async function openPlayer(item) {
     try {
       const detail = await api(`/Users/${store.userId}/Items/${item.Id}`);
       playerItem = detail;
+      const posTicks = (detail.UserData && detail.UserData.PlaybackPositionTicks) || 0;
+      player.initialResumeSeconds = posTicks / 10000000;
       view = "player";
       render();
     } catch (e) {
@@ -358,17 +458,21 @@
   }
 
   function closePlayer() {
+    reportStopped();
     stopEncoding(player.playSessionId);
+    if (player.progressTimer) { clearInterval(player.progressTimer); }
     if (player.hls) { player.hls.destroy(); player.hls = null; }
     if (player.keydownHandler) document.removeEventListener("keydown", player.keydownHandler);
     if (player.docClickHandler) document.removeEventListener("click", player.docClickHandler);
+    if (player.beforeUnloadHandler) window.removeEventListener("beforeunload", player.beforeUnloadHandler);
     if (player.hideTimer) clearTimeout(player.hideTimer);
     Object.assign(player, {
-      item: null, video: null, wrap: null, hideTimer: null,
-      keydownHandler: null, docClickHandler: null, openMenu: null, playSessionId: null,
+      item: null, video: null, wrap: null, hideTimer: null, progressTimer: null,
+      keydownHandler: null, docClickHandler: null, beforeUnloadHandler: null, openMenu: null, playSessionId: null,
     });
     playerItem = null;
     view = "browse";
+    if (crumbs.length <= 1) loadContinueWatching();
     render();
   }
 
@@ -419,6 +523,11 @@
     const onReady = () => {
       if (resumeTime) video.currentTime = resumeTime;
       if (wasPlaying) video.play().catch(() => {});
+      reportPlayingStart();
+      if (player.progressTimer) clearInterval(player.progressTimer);
+      player.progressTimer = setInterval(() => {
+        if (player.video && !player.video.paused) reportProgress(false);
+      }, 10000);
     };
 
     if (window.Hls && window.Hls.isSupported()) {
@@ -521,7 +630,8 @@
 
     const defaultAudio = player.audioStreams.find((s) => s.IsDefault) || player.audioStreams[0];
     player.currentAudioIndex = defaultAudio ? defaultAudio.Index : null;
-    const defaultSub = player.subtitleStreams.find((s) => s.IsDefault);
+    const englishSub = player.subtitleStreams.find((s) => (s.Language || "").toLowerCase().startsWith("en"));
+    const defaultSub = englishSub || player.subtitleStreams[0];
     player.currentSubtitleIndex = defaultSub ? defaultSub.Index : -1;
     player.playSessionId = crypto.randomUUID();
 
@@ -659,7 +769,7 @@
 
     // -- wire up video events --
     video.addEventListener("play", () => { wrap.classList.remove("paused"); playBtn.replaceChildren(icon("pause")); showControls(); });
-    video.addEventListener("pause", () => { wrap.classList.add("paused"); playBtn.replaceChildren(icon("play")); wrap.classList.remove("controls-hidden"); });
+    video.addEventListener("pause", () => { wrap.classList.add("paused"); playBtn.replaceChildren(icon("play")); wrap.classList.remove("controls-hidden"); reportProgress(true); });
     video.addEventListener("waiting", () => wrap.classList.add("buffering"));
     video.addEventListener("playing", () => wrap.classList.remove("buffering"));
     video.addEventListener("volumechange", () => {
@@ -711,10 +821,13 @@
     };
     document.addEventListener("keydown", player.keydownHandler);
 
+    player.beforeUnloadHandler = () => reportStopped();
+    window.addEventListener("beforeunload", player.beforeUnloadHandler);
+
     if (window.Hls && window.Hls.isSupported()) {
-      attachSource(0, true);
+      attachSource(player.initialResumeSeconds, true);
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      attachSource(0, true);
+      attachSource(player.initialResumeSeconds, true);
     } else {
       wrap.appendChild(el("div", { class: "error" }, "This browser cannot play HLS streams."));
     }
