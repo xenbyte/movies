@@ -386,6 +386,7 @@
     subtitleStreams: [],
     currentAudioIndex: null,
     currentSubtitleIndex: -1,
+    subtitleTrackEl: null,
     playSessionId: null,
     initialResumeSeconds: 0,
     progressTimer: null,
@@ -487,7 +488,7 @@
     Object.assign(player, {
       item: null, video: null, wrap: null, hideTimer: null, progressTimer: null, upNextTimer: null, loadTimeout: null,
       keydownHandler: null, docClickHandler: null, beforeUnloadHandler: null, openMenu: null, playSessionId: null,
-      nextItem: null, siblingList: null,
+      nextItem: null, siblingList: null, subtitleTrackEl: null,
     });
   }
 
@@ -555,7 +556,12 @@
       PlaySessionId: player.playSessionId,
     };
     if (player.audioStreams.length > 0) {
-      params.AudioCodec = "aac,ac3,eac3,mp3,flac,opus";
+      // AC3/E-AC3 (Dolby Digital/Plus) are excluded: standard browsers can't
+      // decode them via Media Source Extensions (no Dolby license), so
+      // listing them here would make Jellyfin "copy" undecodable audio
+      // straight into the stream instead of transcoding it to something
+      // the browser can actually play.
+      params.AudioCodec = "aac,mp3,flac,opus";
       params.MaxAudioChannels = 6;
       if (player.currentAudioIndex != null) params.AudioStreamIndex = player.currentAudioIndex;
     }
@@ -654,10 +660,23 @@
 
   function switchSubtitle(index) {
     player.currentSubtitleIndex = index;
-    const tracks = player.video.textTracks;
-    for (let i = 0; i < tracks.length; i++) {
-      tracks[i].mode = player.subtitleStreams[i].Index === index ? "showing" : "disabled";
+    if (player.subtitleTrackEl) {
+      player.subtitleTrackEl.remove();
+      player.subtitleTrackEl = null;
     }
+    if (index === -1 || !player.video) return;
+    const stream = player.subtitleStreams.find((s) => s.Index === index);
+    if (!stream) return;
+    const track = el("track", {
+      kind: "subtitles",
+      label: stream.DisplayTitle || stream.Language || `Track ${stream.Index}`,
+      srclang: stream.Language || "und",
+      src: apiKeyUrl(`/Videos/${player.item.Id}/${player.mediaSourceId}/Subtitles/${stream.Index}/Stream.vtt`),
+    });
+    player.video.appendChild(track);
+    player.subtitleTrackEl = track;
+    if (track.track) track.track.mode = "showing";
+    else track.addEventListener("load", () => { if (track.track) track.track.mode = "showing"; }, { once: true });
   }
 
   function closeMenus() {
@@ -721,17 +740,8 @@
 
     const video = el("video", { playsinline: "", autoplay: "" });
     player.video = video;
-
-    for (const s of player.subtitleStreams) {
-      video.appendChild(
-        el("track", {
-          kind: "subtitles",
-          label: s.DisplayTitle || s.Language || `Track ${s.Index}`,
-          srclang: s.Language || "und",
-          src: apiKeyUrl(`/Videos/${item.Id}/${player.mediaSourceId}/Subtitles/${s.Index}/Stream.vtt`),
-        })
-      );
-    }
+    player.subtitleTrackEl = null;
+    switchSubtitle(player.currentSubtitleIndex);
 
     const topbar = el("div", { class: "player-topbar" }, [
       el("button", { class: "btn", onclick: closePlayer }, "← Back"),
@@ -884,8 +894,8 @@
       }
     });
     video.addEventListener("loadedmetadata", () => {
-      for (let i = 0; i < video.textTracks.length; i++) {
-        video.textTracks[i].mode = player.subtitleStreams[i].Index === player.currentSubtitleIndex ? "showing" : "disabled";
+      if (player.subtitleTrackEl && player.subtitleTrackEl.track) {
+        player.subtitleTrackEl.track.mode = "showing";
       }
     });
 
