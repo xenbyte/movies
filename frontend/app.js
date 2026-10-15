@@ -355,6 +355,7 @@
     cc: '<rect x="2" y="5" width="20" height="14" rx="2" fill="none"/><path d="M9 10.5c-.5-.6-1.1-1-2-1-1.3 0-2.3 1.1-2.3 2.5S5.7 14.5 7 14.5c.9 0 1.5-.4 2-1M17.3 10.5c-.5-.6-1.1-1-2-1-1.3 0-2.3 1.1-2.3 2.5s1 2.5 2.3 2.5c.9 0 1.5-.4 2-1" fill="none"/>',
     audio: '<path d="M9 18V5l12-2v13" fill="none"/><circle cx="6" cy="18" r="3" fill="none"/><circle cx="18" cy="16" r="3" fill="none"/>',
     speed: '<circle cx="12" cy="13" r="8" fill="none"/><path d="M12 13l4-4M12 5V3M4.2 7.2l1.4 1.4M19.8 7.2l-1.4 1.4" fill="none"/>',
+    download: '<path d="M12 3v12M7 10l5 5 5-5" fill="none"/><path d="M4 19h16" fill="none"/>',
     pip: '<rect x="3" y="4" width="18" height="16" rx="1.5" fill="none"/><rect x="11" y="11" width="8" height="6" rx="1" fill="currentColor"/>',
     fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" fill="none"/>',
     fullscreenExit: '<path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M9 21v-3a2 2 0 0 0-2-2H4M15 21v-3a2 2 0 0 1 2-2h3" fill="none"/>',
@@ -388,6 +389,7 @@
     playSessionId: null,
     initialResumeSeconds: 0,
     progressTimer: null,
+    loadTimeout: null,
     nextItem: null,
     siblingList: null,
     upNextTimer: null,
@@ -476,13 +478,14 @@
     stopEncoding(player.playSessionId);
     if (player.progressTimer) clearInterval(player.progressTimer);
     if (player.upNextTimer) clearInterval(player.upNextTimer);
+    if (player.loadTimeout) clearTimeout(player.loadTimeout);
     if (player.hls) { player.hls.destroy(); player.hls = null; }
     if (player.keydownHandler) document.removeEventListener("keydown", player.keydownHandler);
     if (player.docClickHandler) document.removeEventListener("click", player.docClickHandler);
     if (player.beforeUnloadHandler) window.removeEventListener("beforeunload", player.beforeUnloadHandler);
     if (player.hideTimer) clearTimeout(player.hideTimer);
     Object.assign(player, {
-      item: null, video: null, wrap: null, hideTimer: null, progressTimer: null, upNextTimer: null,
+      item: null, video: null, wrap: null, hideTimer: null, progressTimer: null, upNextTimer: null, loadTimeout: null,
       keydownHandler: null, docClickHandler: null, beforeUnloadHandler: null, openMenu: null, playSessionId: null,
       nextItem: null, siblingList: null,
     });
@@ -548,17 +551,20 @@
     const params = {
       MediaSourceId: player.mediaSourceId,
       VideoCodec: "h264",
-      AudioCodec: "aac,ac3,eac3,mp3,flac,opus",
-      MaxAudioChannels: 6,
       DeviceId: store.deviceId,
       PlaySessionId: player.playSessionId,
     };
-    if (player.currentAudioIndex != null) params.AudioStreamIndex = player.currentAudioIndex;
+    if (player.audioStreams.length > 0) {
+      params.AudioCodec = "aac,ac3,eac3,mp3,flac,opus";
+      params.MaxAudioChannels = 6;
+      if (player.currentAudioIndex != null) params.AudioStreamIndex = player.currentAudioIndex;
+    }
     return apiKeyUrl(`/Videos/${player.item.Id}/master.m3u8`, params);
   }
 
   function showFatalPlayerError(message) {
     setBuffering(false);
+    if (player.loadTimeout) { clearTimeout(player.loadTimeout); player.loadTimeout = null; }
     if (player.hls) { player.hls.destroy(); player.hls = null; }
     if (!player.wrap) return;
     const existing = player.wrap.querySelector(".player-fatal-error");
@@ -580,6 +586,7 @@
   function attachSource(resumeTime, wasPlaying) {
     const video = player.video;
     if (player.hls) { player.hls.destroy(); player.hls = null; }
+    if (player.loadTimeout) { clearTimeout(player.loadTimeout); player.loadTimeout = null; }
     if (player.wrap) {
       const existingErr = player.wrap.querySelector(".player-fatal-error");
       if (existingErr) existingErr.remove();
@@ -588,7 +595,12 @@
     player.mediaErrorCount = 0;
     const url = buildStreamUrl();
 
+    player.loadTimeout = setTimeout(() => {
+      showFatalPlayerError("This video failed to load.");
+    }, 20000);
+
     const onReady = () => {
+      if (player.loadTimeout) { clearTimeout(player.loadTimeout); player.loadTimeout = null; }
       if (resumeTime) video.currentTime = resumeTime;
       if (wasPlaying) video.play().catch(() => {});
       reportPlayingStart();
@@ -810,6 +822,14 @@
       );
     });
 
+    const downloadBtn = el("a", {
+      class: "icon-btn",
+      "data-id": "download",
+      title: "Download",
+      href: apiKeyUrl(`/Items/${item.Id}/Download`),
+      rel: "noopener",
+    }, icon("download"));
+
     const pipBtn = el("button", { class: "icon-btn", "data-id": "pip", title: "Picture in picture" }, icon("pip"));
     if (!document.pictureInPictureEnabled) pipBtn.style.display = "none";
     pipBtn.addEventListener("click", () => {
@@ -831,7 +851,7 @@
           el("div", { class: "volume-group" }, [volumeBtn, volumeSlider]),
           timeText,
         ]),
-        el("div", { class: "controls-group" }, [audioBtn, subsBtn, speedBtn, pipBtn, fullscreenBtn]),
+        el("div", { class: "controls-group" }, [audioBtn, subsBtn, speedBtn, downloadBtn, pipBtn, fullscreenBtn]),
       ]),
     ]);
 

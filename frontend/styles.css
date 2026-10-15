@@ -562,6 +562,7 @@ main {
   justify-content: center;
   cursor: pointer;
   position: relative;
+  text-decoration: none;
   transition: color 0.15s ease, background 0.15s ease;
 }
 .icon-btn:hover { color: var(--accent); background: rgba(57, 255, 136, 0.08); }
