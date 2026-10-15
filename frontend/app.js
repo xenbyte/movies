@@ -50,6 +50,9 @@
   function logout() {
     store.token = "";
     store.userId = "";
+    view = "login";
+    crumbs = [];
+    items = [];
     render();
   }
 
@@ -164,6 +167,35 @@
     }
   }
 
+  async function waitForLibraryIdle(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const tasks = await api("/ScheduledTasks?IsHidden=false");
+        const task = tasks.find((t) => t.Key === "RefreshLibrary");
+        if (!task || task.State === "Idle") return;
+      } catch (e) { /* keep polling */ }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
+  async function refreshLibrary(btn) {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Refreshing…";
+    try {
+      await fetch("/Library/Refresh", { method: "POST", headers: { Authorization: authHeader(true) } });
+      await new Promise((r) => setTimeout(r, 800));
+      await waitForLibraryIdle(60000);
+      const parentId = crumbs.length ? crumbs[crumbs.length - 1].id : null;
+      if (parentId) await loadItems(parentId);
+      else await loadRoot();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
   function thumbUrl(item) {
     if (item.ImageTags && item.ImageTags.Primary) {
       return apiKeyUrl(`/Items/${item.Id}/Images/Primary`, { maxWidth: 300, tag: item.ImageTags.Primary });
@@ -194,9 +226,13 @@
       );
     });
 
+    const refreshBtn = el("button", { class: "btn", title: "Rescan library for changes" }, "Refresh");
+    refreshBtn.addEventListener("click", () => refreshLibrary(refreshBtn));
+
     const topbar = el("div", { class: "topbar" }, [
       el("div", { class: "brand" }, ["xenbyte", el("span", { class: "sub" }, "movies")]),
       bc,
+      refreshBtn,
       el("button", { class: "btn", onclick: logout }, "Sign out"),
     ]);
 
@@ -280,6 +316,7 @@
     subtitleStreams: [],
     currentAudioIndex: null,
     currentSubtitleIndex: -1,
+    playSessionId: null,
     hls: null,
     video: null,
     wrap: null,
@@ -288,6 +325,13 @@
     docClickHandler: null,
     openMenu: null,
   };
+
+  function stopEncoding(playSessionId) {
+    if (!playSessionId) return Promise.resolve();
+    return fetch(apiKeyUrl("/Videos/ActiveEncodings", { DeviceId: store.deviceId, PlaySessionId: playSessionId }), {
+      method: "DELETE",
+    }).catch(() => {});
+  }
 
   async function openPlayer(item) {
     try {
@@ -302,13 +346,14 @@
   }
 
   function closePlayer() {
+    stopEncoding(player.playSessionId);
     if (player.hls) { player.hls.destroy(); player.hls = null; }
     if (player.keydownHandler) document.removeEventListener("keydown", player.keydownHandler);
     if (player.docClickHandler) document.removeEventListener("click", player.docClickHandler);
     if (player.hideTimer) clearTimeout(player.hideTimer);
     Object.assign(player, {
       item: null, video: null, wrap: null, hideTimer: null,
-      keydownHandler: null, docClickHandler: null, openMenu: null,
+      keydownHandler: null, docClickHandler: null, openMenu: null, playSessionId: null,
     });
     playerItem = null;
     view = "browse";
@@ -322,6 +367,7 @@
       AudioCodec: "aac,ac3,eac3,mp3,flac,opus",
       MaxAudioChannels: 6,
       DeviceId: store.deviceId,
+      PlaySessionId: player.playSessionId,
     };
     if (player.currentAudioIndex != null) params.AudioStreamIndex = player.currentAudioIndex;
     return apiKeyUrl(`/Videos/${player.item.Id}/master.m3u8`, params);
@@ -358,8 +404,15 @@
     if (index === player.currentAudioIndex) return;
     const t = player.video.currentTime;
     const wasPlaying = !player.video.paused;
+    const oldSession = player.playSessionId;
     player.currentAudioIndex = index;
-    attachSource(t, wasPlaying);
+    player.playSessionId = crypto.randomUUID();
+    setBuffering(true);
+    stopEncoding(oldSession).finally(() => attachSource(t, wasPlaying));
+  }
+
+  function setBuffering(on) {
+    if (player.wrap) player.wrap.classList.toggle("buffering", on);
   }
 
   function switchSubtitle(index) {
@@ -422,6 +475,7 @@
     player.currentAudioIndex = defaultAudio ? defaultAudio.Index : null;
     const defaultSub = player.subtitleStreams.find((s) => s.IsDefault);
     player.currentSubtitleIndex = defaultSub ? defaultSub.Index : -1;
+    player.playSessionId = crypto.randomUUID();
 
     const video = el("video", { playsinline: "", autoplay: "" });
     player.video = video;
