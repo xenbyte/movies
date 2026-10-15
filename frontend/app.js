@@ -219,6 +219,15 @@
     }
   }
 
+  function findNextVideo(list, current) {
+    const idx = list.findIndex((it) => it.Id === current.Id);
+    if (idx === -1) return null;
+    for (let i = idx + 1; i < list.length; i++) {
+      if (!list[i].IsFolder) return list[i];
+    }
+    return null;
+  }
+
   function thumbUrl(item) {
     if (item.ImageTags && item.ImageTags.Primary) {
       return apiKeyUrl(`/Items/${item.Id}/Images/Primary`, { maxWidth: 300, tag: item.ImageTags.Primary });
@@ -319,7 +328,7 @@
             crumbs = crumbs.concat([{ id: item.Id, name: item.Name }]);
             loadItems(item.Id);
           } else {
-            openPlayer(item);
+            openPlayer(item, items);
           }
         };
         tile.addEventListener("click", activate);
@@ -379,6 +388,9 @@
     playSessionId: null,
     initialResumeSeconds: 0,
     progressTimer: null,
+    nextItem: null,
+    siblingList: null,
+    upNextTimer: null,
     hls: null,
     video: null,
     wrap: null,
@@ -443,12 +455,14 @@
     }
   }
 
-  async function openPlayer(item) {
+  async function openPlayer(item, siblingList) {
     try {
       const detail = await api(`/Users/${store.userId}/Items/${item.Id}`);
       playerItem = detail;
       const posTicks = (detail.UserData && detail.UserData.PlaybackPositionTicks) || 0;
       player.initialResumeSeconds = posTicks / 10000000;
+      player.siblingList = siblingList || null;
+      player.nextItem = siblingList ? findNextVideo(siblingList, item) : null;
       view = "player";
       render();
     } catch (e) {
@@ -457,23 +471,77 @@
     }
   }
 
-  function closePlayer() {
+  function teardownPlayerSession() {
     reportStopped();
     stopEncoding(player.playSessionId);
-    if (player.progressTimer) { clearInterval(player.progressTimer); }
+    if (player.progressTimer) clearInterval(player.progressTimer);
+    if (player.upNextTimer) clearInterval(player.upNextTimer);
     if (player.hls) { player.hls.destroy(); player.hls = null; }
     if (player.keydownHandler) document.removeEventListener("keydown", player.keydownHandler);
     if (player.docClickHandler) document.removeEventListener("click", player.docClickHandler);
     if (player.beforeUnloadHandler) window.removeEventListener("beforeunload", player.beforeUnloadHandler);
     if (player.hideTimer) clearTimeout(player.hideTimer);
     Object.assign(player, {
-      item: null, video: null, wrap: null, hideTimer: null, progressTimer: null,
+      item: null, video: null, wrap: null, hideTimer: null, progressTimer: null, upNextTimer: null,
       keydownHandler: null, docClickHandler: null, beforeUnloadHandler: null, openMenu: null, playSessionId: null,
+      nextItem: null, siblingList: null,
     });
+  }
+
+  function closePlayer() {
+    teardownPlayerSession();
     playerItem = null;
     view = "browse";
     if (crumbs.length <= 1) loadContinueWatching();
     render();
+  }
+
+  function advanceToNext() {
+    if (!player.nextItem) return;
+    const next = player.nextItem;
+    const siblingList = player.siblingList;
+    teardownPlayerSession();
+    openPlayer(next, siblingList);
+  }
+
+  function showUpNext() {
+    if (!player.nextItem || !player.wrap) return;
+    const next = player.nextItem;
+    const thumb = thumbUrl(next);
+    let remaining = 10;
+
+    const thumbEl = el("div", {
+      class: "upnext-thumb",
+      style: thumb ? `background-image:url('${thumb}')` : "",
+    });
+    if (!thumb) thumbEl.textContent = "\u{1F3AC}";
+
+    const playBtnLabel = el("span", {}, `Play now (${remaining}s)`);
+    const dismiss = () => { if (player.upNextTimer) clearInterval(player.upNextTimer); player.upNextTimer = null; box.remove(); };
+
+    const box = el("div", { class: "player-upnext" }, [
+      thumbEl,
+      el("div", { class: "upnext-info" }, [
+        el("div", { class: "upnext-label" }, "Up Next"),
+        el("div", { class: "upnext-title" }, next.Name),
+        el("div", { class: "upnext-actions" }, [
+          el("button", { class: "btn", onclick: dismiss }, "Cancel"),
+          el("button", { class: "btn upnext-play", onclick: () => { dismiss(); advanceToNext(); } }, [playBtnLabel]),
+        ]),
+      ]),
+    ]);
+    player.wrap.appendChild(box);
+
+    player.upNextTimer = setInterval(() => {
+      remaining -= 1;
+      playBtnLabel.textContent = `Play now (${remaining}s)`;
+      if (remaining <= 0) {
+        clearInterval(player.upNextTimer);
+        player.upNextTimer = null;
+        box.remove();
+        advanceToNext();
+      }
+    }, 1000);
   }
 
   function buildStreamUrl() {
@@ -628,7 +696,11 @@
     player.audioStreams = streams.filter((s) => s.Type === "Audio");
     player.subtitleStreams = streams.filter((s) => s.Type === "Subtitle");
 
-    const defaultAudio = player.audioStreams.find((s) => s.IsDefault) || player.audioStreams[0];
+    const japaneseAudio = player.audioStreams.find((s) => {
+      const l = (s.Language || "").toLowerCase();
+      return l === "jpn" || l === "ja" || l.startsWith("jp");
+    });
+    const defaultAudio = japaneseAudio || player.audioStreams.find((s) => s.IsDefault) || player.audioStreams[0];
     player.currentAudioIndex = defaultAudio ? defaultAudio.Index : null;
     const englishSub = player.subtitleStreams.find((s) => (s.Language || "").toLowerCase().startsWith("en"));
     const defaultSub = englishSub || player.subtitleStreams[0];
@@ -772,6 +844,7 @@
     video.addEventListener("pause", () => { wrap.classList.add("paused"); playBtn.replaceChildren(icon("play")); wrap.classList.remove("controls-hidden"); reportProgress(true); });
     video.addEventListener("waiting", () => wrap.classList.add("buffering"));
     video.addEventListener("playing", () => wrap.classList.remove("buffering"));
+    video.addEventListener("ended", () => { if (player.nextItem) showUpNext(); });
     video.addEventListener("volumechange", () => {
       volumeBtn.replaceChildren(icon(video.muted || video.volume === 0 ? "muted" : "volume"));
     });
