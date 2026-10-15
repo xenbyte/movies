@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: movies-frontend
+  namespace: movies
+  labels:
+    app: movies-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: movies-frontend
+  template:
+    metadata:
+      labels:
+        app: movies-frontend
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "25m"
+            memory: "32Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+        volumeMounts:
+        - name: frontend-files
+          mountPath: /usr/share/nginx/html/index.html
+          subPath: index.html
+        - name: frontend-files
+          mountPath: /usr/share/nginx/html/static/app.js
+          subPath: app.js
+        - name: frontend-files
+          mountPath: /usr/share/nginx/html/static/styles.css
+          subPath: styles.css
+        - name: nginx-conf
+          mountPath: /etc/nginx/conf.d/default.conf
+          subPath: nginx.conf
+      volumes:
+      - name: frontend-files
+        configMap:
+          name: movies-frontend
+      - name: nginx-conf
+        configMap:
+          name: movies-frontend-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: movies-frontend
+  namespace: movies
+spec:
+  selector:
+    app: movies-frontend
+  ports:
+  - port: 80
+    targetPort: 80
