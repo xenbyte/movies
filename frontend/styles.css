@@ -138,12 +138,14 @@ main {
   transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.tile:hover {
+.tile:hover,
+.tile:focus-visible {
   background: var(--surface-hover);
   transform: translateY(-3px);
   border-color: var(--accent-dim);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(57, 255, 136, 0.1);
 }
+.tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .tile .thumb {
   aspect-ratio: 2 / 3;
@@ -321,6 +323,25 @@ main {
 .player-topbar .btn { font-size: 13px; }
 .player-title { font-size: 14px; color: var(--text-dim); }
 
+.player-fatal-error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 6;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.player-fatal-error-msg { color: var(--text); font-size: 14px; max-width: 280px; }
+
 .player-wrap.controls-hidden .player-topbar,
 .player-wrap.controls-hidden .controls-bar {
   opacity: 0;
@@ -463,20 +484,14 @@ main {
 .volume-group {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
 }
 .volume-slider {
-  width: 0;
-  opacity: 0;
-  transition: width 0.18s ease, opacity 0.18s ease, margin 0.18s ease;
-  accent-color: var(--accent);
-  margin-left: 0;
-}
-.volume-group:hover .volume-slider,
-.volume-group:focus-within .volume-slider {
   width: 70px;
-  opacity: 1;
-  margin-left: 4px;
+  accent-color: var(--accent);
+}
+@media (max-width: 560px) {
+  .volume-slider { width: 44px; }
 }
 
 .menu {
@@ -510,3 +525,17 @@ main {
 .menu-item.active { color: var(--accent); font-weight: 600; }
 
 .icon svg { display: block; }
+
+@media (max-width: 560px) {
+  .controls-bar { padding: 8px 10px 10px; }
+  .controls-row { gap: 4px; }
+  .controls-group { gap: 0; }
+  .icon-btn { width: 30px; height: 30px; }
+  .time-text { font-size: 11px; margin-left: 2px; }
+  .player-topbar { padding: 10px 12px; }
+  .center-play { width: 56px; height: 56px; }
+}
+
+@media (max-width: 400px) {
+  .time-text { display: none; }
+}

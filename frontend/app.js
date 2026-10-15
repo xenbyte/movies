@@ -63,6 +63,7 @@
   let loading = false;
   let errorMsg = "";
   let playerItem = null;
+  let loadGeneration = 0;
 
   const root = document.getElementById("app");
 
@@ -127,10 +128,12 @@
   }
 
   async function loadRoot() {
+    const gen = ++loadGeneration;
     loading = true; errorMsg = "";
     render();
     try {
       const views = await api(`/Users/${store.userId}/Views`);
+      if (gen !== loadGeneration) return;
       const libs = (views.Items || []).filter((v) => v.Type === "CollectionFolder");
       if (libs.length === 1) {
         crumbs = [{ id: libs[0].Id, name: libs[0].Name }];
@@ -142,6 +145,7 @@
       loading = false;
       render();
     } catch (e) {
+      if (gen !== loadGeneration) return;
       loading = false;
       errorMsg = e.message;
       render();
@@ -149,6 +153,7 @@
   }
 
   async function loadItems(parentId) {
+    const gen = ++loadGeneration;
     loading = true; errorMsg = "";
     render();
     try {
@@ -157,10 +162,12 @@
           `&Recursive=false&SortBy=IsFolder,SortName&SortOrder=Descending,Ascending` +
           `&Fields=PrimaryImageAspectRatio`
       );
+      if (gen !== loadGeneration) return;
       items = data.Items || [];
       loading = false;
       render();
     } catch (e) {
+      if (gen !== loadGeneration) return;
       loading = false;
       errorMsg = e.message;
       render();
@@ -254,17 +261,22 @@
           style: thumb ? `background-image:url('${thumb}')` : "",
         });
         if (!thumb) thumbEl.textContent = isFolder ? "\u{1F4C1}" : "\u{1F3AC}";
-        const tile = el("div", { class: `tile ${isFolder ? "folder" : "video"}` }, [
-          thumbEl,
-          el("div", { class: "label" }, item.Name),
-        ]);
-        tile.addEventListener("click", () => {
+        const tile = el(
+          "div",
+          { class: `tile ${isFolder ? "folder" : "video"}`, tabindex: "0", role: "button" },
+          [thumbEl, el("div", { class: "label" }, item.Name)]
+        );
+        const activate = () => {
           if (isFolder) {
             crumbs = crumbs.concat([{ id: item.Id, name: item.Name }]);
             loadItems(item.Id);
           } else {
             openPlayer(item);
           }
+        };
+        tile.addEventListener("click", activate);
+        tile.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
         });
         grid.appendChild(tile);
       }
@@ -373,9 +385,35 @@
     return apiKeyUrl(`/Videos/${player.item.Id}/master.m3u8`, params);
   }
 
+  function showFatalPlayerError(message) {
+    setBuffering(false);
+    if (player.hls) { player.hls.destroy(); player.hls = null; }
+    if (!player.wrap) return;
+    const existing = player.wrap.querySelector(".player-fatal-error");
+    if (existing) existing.remove();
+    const box = el("div", { class: "player-fatal-error" }, [
+      el("div", { class: "player-fatal-error-msg" }, message),
+      el(
+        "button",
+        {
+          class: "btn",
+          onclick: () => { box.remove(); attachSource(player.video.currentTime || 0, true); },
+        },
+        "Retry"
+      ),
+    ]);
+    player.wrap.appendChild(box);
+  }
+
   function attachSource(resumeTime, wasPlaying) {
     const video = player.video;
     if (player.hls) { player.hls.destroy(); player.hls = null; }
+    if (player.wrap) {
+      const existingErr = player.wrap.querySelector(".player-fatal-error");
+      if (existingErr) existingErr.remove();
+    }
+    player.networkErrorCount = 0;
+    player.mediaErrorCount = 0;
     const url = buildStreamUrl();
 
     const onReady = () => {
@@ -391,12 +429,22 @@
       hls.once(window.Hls.Events.MANIFEST_PARSED, onReady);
       hls.on(window.Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
-        if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-        else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+        if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+          player.networkErrorCount++;
+          if (player.networkErrorCount > 3) showFatalPlayerError("Lost connection to the server.");
+          else hls.startLoad();
+        } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+          player.mediaErrorCount++;
+          if (player.mediaErrorCount > 2) showFatalPlayerError("This video could not be played.");
+          else hls.recoverMediaError();
+        } else {
+          showFatalPlayerError("Playback error. Please try again.");
+        }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = url;
       video.addEventListener("loadedmetadata", onReady, { once: true });
+      video.addEventListener("error", () => showFatalPlayerError("This video could not be played."), { once: true });
     }
   }
 
